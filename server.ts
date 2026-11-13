@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_ATS_SOURCES, pollAtsSources } from './server/ats';
-import { matchJobsWithGemini, parseResumeWithGemini } from './server/gemini';
+import { getAiProvider, hasClaudeKey, hasGeminiKey, matchJobs, parseAiProvider, parseResume, type AiOverride } from './server/ai';
 import type { AtsSource, NormalizedJob, ParsedResume } from './src/types/ats';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -13,6 +13,13 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT || 3000);
 const isProduction = process.env.NODE_ENV === 'production';
 
+/** Reads a UI-supplied provider/key from request headers (used for this request only, never stored). */
+function getAiOverride(req: express.Request): AiOverride | undefined {
+  const apiKey = req.header('x-ai-api-key')?.trim();
+  const provider = parseAiProvider(req.header('x-ai-provider'));
+  return apiKey && provider ? { apiKey, provider } : undefined;
+}
+
 async function createServer() {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
@@ -20,7 +27,9 @@ async function createServer() {
   app.get('/api/health', (_req, res) => {
     res.json({
       ok: true,
-      hasGeminiKey: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY'),
+      aiProvider: getAiProvider(),
+      hasGeminiKey: hasGeminiKey(),
+      hasClaudeKey: hasClaudeKey(),
       timestamp: new Date().toISOString(),
     });
   });
@@ -66,10 +75,10 @@ async function createServer() {
         return;
       }
 
-      const parsed = await parseResumeWithGemini({ resumeText, fileBase64, mimeType });
+      const parsed = await parseResume({ resumeText, fileBase64, mimeType }, getAiOverride(req));
       res.json({ resume: parsed });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to parse resume with Gemini';
+      const message = error instanceof Error ? error.message : 'Failed to parse resume';
       res.status(500).json({ error: message });
     }
   });
@@ -88,7 +97,7 @@ async function createServer() {
 
       // Process up to 10 jobs per request cleanly to keep latency crisp
       const batch = jobs.slice(0, 10);
-      const matches = await matchJobsWithGemini(resume, batch);
+      const matches = await matchJobs(resume, batch, getAiOverride(req));
       res.json({ matches });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to analyze job matches';

@@ -1,10 +1,11 @@
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import type { JobMatchAnalysis, NormalizedJob, ParsedResume } from '../src/types/ats';
+import { MATCH_SYSTEM_INSTRUCTION, RESUME_SYSTEM_INSTRUCTION, buildMatchPayload } from './prompts';
 
-function getAiClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY;
+function getAiClient(overrideKey?: string): GoogleGenAI {
+  const apiKey = overrideKey?.trim() || process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-    throw new Error('GEMINI_API_KEY is not configured. Add it in Settings > Secrets to enable AI matching.');
+    throw new Error('GEMINI_API_KEY is not configured. Add a Gemini key in AI Settings or set it in .env.');
   }
   return new GoogleGenAI({
     apiKey,
@@ -62,13 +63,10 @@ export async function parseResumeWithGemini(input: {
   resumeText?: string;
   fileBase64?: string;
   mimeType?: string;
-}): Promise<ParsedResume> {
-  const ai = getAiClient();
+}, apiKey?: string): Promise<ParsedResume> {
+  const ai = getAiClient(apiKey);
 
-  const instruction = `You are a precise technical recruiter and resume parser.
-Extract structured candidate information from the provided resume.
-Be factual and grounded strictly in the resume content. Do not invent skills or years of experience that are not supported by the text.
-If extracting from an attached PDF/document, also reconstruct a clean plain-text summary in rawText.`;
+  const instruction = RESUME_SYSTEM_INSTRUCTION;
 
   const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
 
@@ -161,49 +159,18 @@ If extracting from an attached PDF/document, also reconstruct a clean plain-text
 
 export async function matchJobsWithGemini(
   resume: ParsedResume,
-  jobs: NormalizedJob[]
+  jobs: NormalizedJob[],
+  apiKey?: string
 ): Promise<JobMatchAnalysis[]> {
   if (jobs.length === 0) return [];
-  const ai = getAiClient();
+  const ai = getAiClient(apiKey);
 
-  const candidateProfile = {
-    headline: resume.headline,
-    yearsExperience: resume.yearsExperience,
-    location: resume.location,
-    coreSkills: resume.coreSkills,
-    toolsAndFrameworks: resume.toolsAndFrameworks,
-    domains: resume.domains,
-    summary: resume.summary,
-    rawExcerpt: resume.rawText.slice(0, 3500),
-  };
-
-  const compactJobs = jobs.map((job) => ({
-    jobId: job.id,
-    company: job.company,
-    title: job.title,
-    department: job.department,
-    location: job.location,
-    workplaceType: job.workplaceType,
-    description: job.descriptionText.slice(0, 2600),
-  }));
-
-  const systemInstruction = `You are a rigorous, honest hiring calibration engine comparing a candidate resume against live job postings.
-For each job, assign a realistic confidenceScore from 0 to 100:
-- 82-100 ("Strong Fit"): Meets core role level, primary tech stack/domain, and most explicit requirements.
-- 65-81 ("Good Fit"): Strong overlap on core skills with minor tooling or domain gaps.
-- 45-64 ("Partial Fit"): Meaningful transferable skills, but missing several explicit requirements or seniority match.
-- 0-44 ("Stretch"): Significant domain, stack, or seniority mismatch.
-
-Be specific and cite actual technologies/requirements from the job description.
-For missingGaps, list concrete missing skills, certifications, domain experience, or seniority gaps with actionable bridgeTips. Keep matchedSkills concise (up to 8 items) and missingGaps focused on the top 2-5 real gaps.`;
+  const systemInstruction = MATCH_SYSTEM_INSTRUCTION;
 
   const response = await withRetry((model) =>
     ai.models.generateContent({
       model,
-      contents: JSON.stringify({
-        candidate: candidateProfile,
-        jobs: compactJobs,
-      }),
+      contents: JSON.stringify(buildMatchPayload(resume, jobs)),
       config: {
         systemInstruction,
         thinkingConfig: {

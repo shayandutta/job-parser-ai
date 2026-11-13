@@ -2,6 +2,7 @@ import * as React from 'react';
 import {
   Briefcase,
   CheckCircle2,
+  KeyRound,
   Loader2,
   RefreshCw,
   Search,
@@ -9,6 +10,12 @@ import {
   Sparkles,
   Upload,
 } from 'lucide-react';
+import {
+  AiSettingsDialog,
+  maskKey,
+  type AiSettings,
+  type ServerAiStatus,
+} from '@/src/components/AiSettingsDialog';
 import { AtsSourcesView } from '@/src/components/AtsSourcesView';
 import { JobMatchInspector } from '@/src/components/JobMatchInspector';
 import { ResumeWorkspace } from '@/src/components/ResumeWorkspace';
@@ -49,6 +56,7 @@ const STORAGE_KEYS = {
   draft: 'rolepulse_resume_draft_v1',
   matches: 'rolepulse_matches_v1',
   sources: 'rolepulse_sources_v1',
+  aiSettings: 'rolepulse_ai_settings_v1',
 };
 
 function readStorage<T>(key: string, fallback: T): T {
@@ -98,6 +106,43 @@ export default function App() {
   const [analyzingJobIds, setAnalyzingJobIds] = React.useState<Record<string, boolean>>({});
   const [isBatchScoring, setIsBatchScoring] = React.useState(false);
   const [analyzeErrors, setAnalyzeErrors] = React.useState<Record<string, string>>({});
+
+  // AI provider + key supplied from the UI (kept in this browser only)
+  const [aiSettings, setAiSettings] = React.useState<AiSettings | null>(() =>
+    readStorage<AiSettings | null>(STORAGE_KEYS.aiSettings, null)
+  );
+  const [aiSettingsOpen, setAiSettingsOpen] = React.useState(false);
+  const [serverAiStatus, setServerAiStatus] = React.useState<ServerAiStatus | null>(null);
+
+  React.useEffect(() => {
+    try {
+      if (aiSettings) localStorage.setItem(STORAGE_KEYS.aiSettings, JSON.stringify(aiSettings));
+      else localStorage.removeItem(STORAGE_KEYS.aiSettings);
+    } catch {
+      // storage unavailable: key lives in memory for this session only
+    }
+  }, [aiSettings]);
+
+  React.useEffect(() => {
+    fetch('/api/health')
+      .then((res) => res.json())
+      .then((data: ServerAiStatus) => setServerAiStatus(data))
+      .catch(() => setServerAiStatus(null));
+  }, []);
+
+  const aiHeaders = React.useCallback((): Record<string, string> => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (aiSettings?.apiKey) {
+      headers['x-ai-provider'] = aiSettings.provider;
+      headers['x-ai-api-key'] = aiSettings.apiKey;
+    }
+    return headers;
+  }, [aiSettings]);
+
+  const hasAnyAiKey = Boolean(aiSettings || serverAiStatus?.hasClaudeKey || serverAiStatus?.hasGeminiKey);
+  const openSettingsIfKeyMissing = (message: string) => {
+    if (/API_KEY is not configured|Invalid ANTHROPIC_API_KEY|API key not valid/i.test(message)) setAiSettingsOpen(true);
+  };
 
   // Persist key state cleanly
   React.useEffect(() => {
@@ -194,7 +239,7 @@ export default function App() {
     try {
       const res = await fetch('/api/resume/parse', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: aiHeaders(),
         body: JSON.stringify({ resumeText: text }),
       });
       const data = (await res.json()) as { resume?: ParsedResume; error?: string };
@@ -207,7 +252,9 @@ export default function App() {
       setMatchesByJobId({});
       setQuickResumeModalOpen(false);
     } catch (err) {
-      setParseError(err instanceof Error ? err.message : 'Unable to parse resume');
+      const message = err instanceof Error ? err.message : 'Unable to parse resume';
+      setParseError(message);
+      openSettingsIfKeyMissing(message);
     } finally {
       setIsParsingResume(false);
     }
@@ -229,7 +276,7 @@ export default function App() {
 
         const res = await fetch('/api/resume/parse', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: aiHeaders(),
           body: JSON.stringify({ fileBase64: base64, mimeType: 'application/pdf' }),
         });
         const data = (await res.json()) as { resume?: ParsedResume; error?: string };
@@ -246,7 +293,9 @@ export default function App() {
         await handleParseText(text);
       }
     } catch (err) {
-      setParseError(err instanceof Error ? err.message : 'Unable to process uploaded file');
+      const message = err instanceof Error ? err.message : 'Unable to process uploaded file';
+      setParseError(message);
+      openSettingsIfKeyMissing(message);
     } finally {
       setIsParsingResume(false);
     }
@@ -283,7 +332,7 @@ export default function App() {
     try {
       const res = await fetch('/api/jobs/match', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: aiHeaders(),
         body: JSON.stringify({ resume, jobs: targetJobs }),
       });
       const data = (await res.json()) as { matches?: JobMatchAnalysis[]; error?: string };
@@ -300,6 +349,7 @@ export default function App() {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to analyze job match';
+      openSettingsIfKeyMissing(message);
       setAnalyzeErrors((prev) => {
         const next = { ...prev };
         jobIds.forEach((id) => {
@@ -443,7 +493,21 @@ export default function App() {
             </button>
           </nav>
 
-          <div className="shrink-0">
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => setAiSettingsOpen(true)}
+              title={aiSettings ? `${aiSettings.provider} key ${maskKey(aiSettings.apiKey)}` : 'Add an AI API key'}
+            >
+              <span
+                className={`size-2 rounded-full ${hasAnyAiKey ? 'bg-emerald-500' : 'bg-amber-500'}`}
+                aria-hidden
+              />
+              <KeyRound className="size-3.5" />
+              {aiSettings ? (aiSettings.provider === 'claude' ? 'Claude' : 'Gemini') : 'AI Key'}
+            </Button>
             <Button type="button" size="sm" onClick={() => void runPoll()} disabled={isPolling}>
               <RefreshCw className={`size-3.5 ${isPolling ? 'animate-spin' : ''}`} />
               {isPolling ? 'Polling ATS...' : 'Poll Fresh Jobs'}
@@ -814,7 +878,7 @@ export default function App() {
           <DialogHeader>
             <DialogTitle>Add Your Resume for AI Match Scoring</DialogTitle>
             <DialogDescription>
-              Upload a PDF/TXT file or paste your resume below. Gemini parses your experience once and scores live ATS openings with gap highlights.
+              Upload a PDF/TXT file or paste your resume below. AI (Claude or Gemini) parses your experience once and scores live ATS openings with gap highlights.
             </DialogDescription>
           </DialogHeader>
 
@@ -889,6 +953,18 @@ export default function App() {
           </div>
         </DialogContent>
       </Dialog>
+
+      <AiSettingsDialog
+        open={aiSettingsOpen}
+        onOpenChange={setAiSettingsOpen}
+        settings={aiSettings}
+        serverStatus={serverAiStatus}
+        onSave={(next) => {
+          setAiSettings(next);
+          setParseError(null);
+        }}
+        onClear={() => setAiSettings(null)}
+      />
     </div>
   );
 }
