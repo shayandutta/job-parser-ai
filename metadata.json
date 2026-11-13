@@ -1,0 +1,8 @@
+{
+  "name": "RolePulse",
+  "description": "Live public ATS job discovery dashboard with resume parsing, confidence match scoring, and skill-gap highlighting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
